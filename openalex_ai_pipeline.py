@@ -200,3 +200,77 @@ for table_name in ("openalex_ai_works", "openalex_ai_annual",
 
 # Release cached data after the dependent output writes have completed.
 ai_works.unpersist(blocking=True)
+
+# COMMAND ----------
+# Optional MLlib task: cluster sample AI works by publication time and citations.
+# Fixed scaling keeps both numeric features on a roughly comparable range.
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.clustering import KMeans
+
+ml_works = (
+    spark.table(f"{OUTPUT_SCHEMA}.openalex_ai_works")
+    .select("id", "publication_year", "cited_by_count")
+    .filter(F.col("publication_year").between(2018, 2025))
+    .withColumn("year_scaled", (F.col("publication_year") - F.lit(2018)) / F.lit(7.0))
+    .withColumn(
+        "log_citations_scaled",
+        F.log1p(F.greatest(F.coalesce(F.col("cited_by_count"), F.lit(0)), F.lit(0)))
+        / F.lit(7.0),
+    )
+)
+assembler = VectorAssembler(
+    inputCols=["year_scaled", "log_citations_scaled"], outputCol="features"
+)
+ml_input = assembler.transform(ml_works)
+kmeans = KMeans(k=3, seed=13, maxIter=20, featuresCol="features",
+                predictionCol="cluster")
+kmeans_model = kmeans.fit(ml_input)
+ml_predictions = kmeans_model.transform(ml_input)
+cluster_summary = (
+    ml_predictions.groupBy("cluster")
+    .agg(
+        F.count("*").alias("sample_works"),
+        F.round(F.avg("publication_year"), 1).alias("mean_publication_year"),
+        F.round(F.avg("cited_by_count"), 1).alias("mean_citations"),
+    )
+    .orderBy("cluster")
+)
+cluster_summary.write.mode("overwrite").saveAsTable(
+    f"{OUTPUT_SCHEMA}.openalex_ai_ml_clusters"
+)
+print("MLlib algorithm: KMeans; k=3; seed=13")
+print("Input works:", ml_input.count())
+print("Cluster summary:")
+cluster_summary.show(truncate=False)
+
+# COMMAND ----------
+# Optional cache bonus: repeat the expensive raw Parquet filter.
+raw_cache_probe = (
+    spark.read.parquet(*WORKS_PATHS)
+    .filter(F.col("publication_year").between(2018, 2025))
+    .filter(F.col("is_xpac") == F.lit(False))
+    .filter(F.col("primary_topic.subfield.id") == AI_SUBFIELD)
+    .select("id", "publication_year", "cited_by_count")
+)
+
+started = perf_counter()
+raw_uncached_count = raw_cache_probe.count()
+raw_uncached_seconds = perf_counter() - started
+
+raw_cache_probe.cache()
+started = perf_counter()
+raw_materialized_count = raw_cache_probe.count()
+raw_materialization_seconds = perf_counter() - started
+
+started = perf_counter()
+raw_cached_count = raw_cache_probe.count()
+raw_cached_seconds = perf_counter() - started
+
+assert raw_uncached_count == raw_materialized_count == raw_cached_count
+print("Raw Parquet uncached count:", raw_uncached_count,
+      "seconds:", round(raw_uncached_seconds, 2))
+print("Raw Parquet cache materialization count:", raw_materialized_count,
+      "seconds:", round(raw_materialization_seconds, 2))
+print("Raw Parquet cached repeat count:", raw_cached_count,
+      "seconds:", round(raw_cached_seconds, 2))
+raw_cache_probe.unpersist(blocking=True)
