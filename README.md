@@ -8,7 +8,7 @@ The source is the [OpenAlex public Parquet snapshot](https://help.openalex.org/a
 
 The question is: **How are publication years, research topics, affiliated countries and educational institutions, and international collaboration represented among AI works in a reproducible OpenAlex file sample?** These are sample findings. The selected files cannot establish global publication totals or growth rates.
 
-Eight Works files were sampled uniformly without replacement from the full manifest using Python `random.Random(13)`. Three of those files were sampled uniformly with `random.Random(1301)`. The final raw input is **2.02 GB compressed**, exceeding the assignment's 1 GB requirement:
+Eight Works files were sampled uniformly without replacement from the full manifest using Python `random.Random(13)`, then sorted by URL. Three of those sorted files were sampled uniformly with `random.Random(1301)` and sorted by URL for reading. The three exact paths total **2,021,062,974 compressed bytes (2.02 GB)** in the 2026-10-14 Works manifest, exceeding the assignment's 1 GB requirement:
 
 ```text
 s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0008.parquet
@@ -35,11 +35,15 @@ workspace.default.openalex_ai_collaboration
 
 The pipeline counts a paper once per country or educational institution, even when multiple coauthors share an affiliation. A multinational paper appears once for each represented country. The international collaboration share uses papers with at least one known affiliated country as its denominator. Citation averages are descriptive because newer publications have had less time to accumulate citations.
 
+## Actions and transformations
+
+The three `filter()` calls, `select()`, and `withColumn()` construct `ai_works` lazily. Printing the DataFrame and calling `explain()` show its schema and planned operators without executing the full record scan. The following `count()` is an action: it starts a distributed Spark job and returns the number of matching works. The later `show()` and Delta writes are actions too. This sequence makes the execution boundary visible in the notebook.
+
 ## Performance analysis
 
 The initial filtered action returned **4,845 AI works** in **27.0 seconds**. The Photon Parquet scan covered the three exact S3 paths. Its physical plan listed the publication-year and `is_xpac` predicates under `DataFilters` and the primary AI subfield predicate under `DictionaryFilters`. It listed `PartitionFilters: []` because the read supplied exact files instead of a partition directory. The scan selected only columns needed by the filtered DataFrame. Query Details for this action showed **17/17 tasks completed**, **26.8 seconds** duration, **4,845 rows read**, and **6.72 MB bytes read** as reported by that view. Those metrics describe this query; they are not a measurement of all bytes in the 2.02 GB compressed input files.
 
-The annual aggregation plan used `PhotonGroupingAgg` for partial aggregation before a hash exchange. Its Delta scan read only `publication_year`, `cited_by_count`, and `period`, confirming column pruning for that query. The Topics join used `PhotonBroadcastHashJoin` with the six small Topics files on the broadcast side, avoiding a shuffle of the large Works side. The main bottlenecks were the remote Parquet scan and the exchanges required by grouping and deduplicating exploded authorships. The pipeline applies year, XPAC, and AI-subfield filters before exploding authorships; materializes the 4,845-row subset once; and leaves the data in its existing partitioning until an aggregation requires exchange. The cache experiment measured **0.62 seconds** for an uncached count, **0.71 seconds** for cache materialization, and **0.50 seconds** for a repeated cached count. This small timing difference is one run, not a reliable benchmark of sustained speedup.
+The annual aggregation plan used `PhotonGroupingAgg` for partial aggregation before a hash exchange. Its Delta scan read only `publication_year`, `cited_by_count`, and `period`, confirming column pruning for that query. The Topics join used `PhotonBroadcastHashJoin` with the six small Topics files on the broadcast side, avoiding a shuffle of the Works side. For the initial count, Query Profile attributed **100% of aggregated operator time to the Scan** (2.91 minutes summed across parallel tasks), while its Shuffle operator took 9 ms; this does not mean the query's wall time was 2.91 minutes. The pipeline filters before exploding authorships and materializes the 4,845-row subset once. It reads three separate physical Parquet files and deliberately avoids `repartition()` before filtering. The saved subset and eight-row annual result are too small to justify publication-year partitioned output, which would produce tiny files; Spark performs a hash exchange only where grouping or deduplication requires one. The cache experiment measured **0.62 seconds** for an uncached count, **0.71 seconds** for cache materialization, and **0.50 seconds** for a repeated cached count. This small timing difference is one run, not a reliable benchmark of sustained speedup.
 
 ## Findings
 
@@ -52,6 +56,7 @@ These screenshots were captured from the completed Databricks notebook. They are
 - [Physical execution plan and pushed filters](screenshots/physical_plan.png)
 - [Successful execution and six saved output tables](screenshots/pipeline_success.png)
 - [Query Details for the initial filtered count](screenshots/query_details.png)
+- [Query Profile showing the scan bottleneck and small count shuffle](screenshots/query_profile.png)
 
 ## Sources
 
