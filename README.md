@@ -1,14 +1,14 @@
-# OpenAlex AI Research: PySpark Data Processing
+# Mapping AI Research with OpenAlex and PySpark
 
-Week 13 Mini Assignment. The pipeline follows the class demonstration's progression from a lazy DataFrame to an action, a physical plan, aggregations, a broadcast join, SQL queries, caching, and saved Delta tables. It also includes the optional MLlib clustering task.
+AI research is often described as a global race, but a publication count alone does not tell us who is contributing, which topics are active, or how researchers work across borders. I used OpenAlex to explore those questions through papers published from 2018 to 2025. My analysis looks at publication years, AI topics, author-affiliated countries and educational institutions, and papers with affiliations in more than one country. I also wanted to see what it takes to process this kind of bibliographic data efficiently in Spark.
 
-## Dataset and research question
+The result is a PySpark pipeline that reads **2.02 GB of source Parquet files**, identifies **4,845 AI papers** in the selected files, joins topic labels, produces several summaries, and saves them as Delta tables in Databricks. The numbers below describe a reproducible *file sample*. They are useful for exploring the data and the processing method, but they are not estimates of worldwide AI output.
 
-The source is the [OpenAlex public Parquet snapshot](https://help.openalex.org/access/snapshot/), dated **2026-10-14**. Works contain publication years, topics, authorships, institutions, countries, and citation counts. The [Works manifest](https://openalex.s3.amazonaws.com/data/parquet/works/manifest.json) reported 1,898 files and 744.0 GB. The [Topics manifest](https://openalex.s3.amazonaws.com/data/parquet/topics/manifest.json) reported six files totaling 5.6 MB.
+## Data and scope
 
-The question is: **How are publication years, research topics, affiliated countries and educational institutions, and international collaboration represented among AI works in a reproducible OpenAlex file sample?** These are sample findings. The selected files cannot establish global publication totals or growth rates.
+I used the [OpenAlex public Parquet snapshot](https://help.openalex.org/access/snapshot/) dated **October 14, 2026**. The Works data includes publication dates, citation counts, primary topics, authorships, and institutional affiliations. A separate Topics dataset provides readable topic names. The snapshot's [Works manifest](https://openalex.s3.amazonaws.com/data/parquet/works/manifest.json) listed 1,898 files totaling about 744 GB; the [Topics manifest](https://openalex.s3.amazonaws.com/data/parquet/topics/manifest.json) listed six files totaling about 5.6 MB.
 
-Eight Works files were sampled uniformly without replacement from the full manifest using Python `random.Random(13)`, then sorted by URL. Three of those sorted files were sampled uniformly with `random.Random(1301)` and sorted by URL for reading. The three exact paths total **2,021,062,974 compressed bytes (2.02 GB)** in the 2026-10-14 Works manifest, exceeding the assignment's 1 GB requirement:
+Processing all Works files was unnecessary for this project, so I selected files with a fixed random seed. I first drew eight files from the manifest with `random.Random(13)`, then drew three of those with `random.Random(1301)`. Their combined compressed size in the manifest is **2,021,062,974 bytes**:
 
 ```text
 s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0008.parquet
@@ -16,69 +16,87 @@ s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0011.parquet
 s3://openalex/data/parquet/works/updated_date=2026-10-14/part_0084.parquet
 ```
 
-OpenAlex partitions these files by the date a record was last updated, **not** its publication date. All three realized sample files have October 2026 update dates. Uniform file sampling gives each record an equal probability of selection at the file level, but three clusters leave substantial sampling uncertainty. The analysis is limited to publications from 2018 through 2025 whose primary topic belongs to the [Artificial Intelligence subfield (`1702`)](https://openalex.org/subfields/1702) and whose `is_xpac` value is false. API records were used to inspect the schema; the snapshot itself determines the reported results.
+OpenAlex organizes these files by **last update date**, not publication year. All three selected files happen to be in October 2026 update partitions. Even though the file selection was random and reproducible, three files are too few to represent the full snapshot reliably. I therefore use “sample works” in tables and discuss patterns within these files rather than making global rankings or growth claims.
 
-## Run the pipeline
+For the analysis, an AI work is a paper published in **2018–2025** whose primary topic belongs to the OpenAlex [Artificial Intelligence subfield (`1702`)](https://openalex.org/subfields/1702). I also exclude records with `is_xpac = true`. This is a specific, repeatable definition of AI; it will miss papers that have AI as a secondary topic.
 
-Import or open [openalex_ai_pipeline.py](openalex_ai_pipeline.py) as a Databricks Python notebook and attach Serverless compute. Run the cells in order. The notebook reads the selected S3 Parquet files, writes a filtered AI subset as Delta, joins the small Topics lookup with a broadcast join, aggregates publication years, topics, countries, institutions, and international collaboration, runs two SQL queries, compares repeated counts with caching, runs KMeans clustering, and writes compact managed Delta tables under `workspace.default`.
+## From raw files to analysis tables
 
-The outputs are:
+The notebook first reads the three Works files directly from the public S3 snapshot. It applies three filters—publication year, `is_xpac`, and primary-topic subfield—before selecting the columns needed later. A `withColumn()` expression labels each paper as `2018–2022` or `2023–2025`. I save the filtered papers as a Delta table so the later summaries do not have to scan the large source files repeatedly.
 
-```text
-workspace.default.openalex_ai_works
-workspace.default.openalex_ai_annual
-workspace.default.openalex_ai_topics
-workspace.default.openalex_ai_countries
-workspace.default.openalex_ai_institutions
-workspace.default.openalex_ai_collaboration
-workspace.default.openalex_ai_ml_clusters
+I join those papers to the much smaller Topics dataset to attach topic names. The other summaries use `groupBy()` aggregations to count papers by year, topic, country, and educational institution. For country and institution counts, I deduplicate each paper–affiliation pair: two coauthors from the same country do not make one paper count twice for that country. A paper with affiliations in two countries counts once in each country's total. The international-collaboration rate is the share of papers with **at least two distinct affiliated countries**, among papers with at least one known country.
+
+The code also runs two Spark SQL queries on temporary views. The first checks yearly paper counts; the second lists the countries most often represented in the sample:
+
+```sql
+SELECT publication_year, COUNT(*) AS sample_works
+FROM ai_works_sample
+GROUP BY publication_year
+ORDER BY publication_year;
+
+SELECT country_code, COUNT(*) AS sample_works
+FROM ai_country_works_sample
+GROUP BY country_code
+ORDER BY sample_works DESC, country_code
+LIMIT 15;
 ```
 
-The pipeline counts a paper once per country or educational institution, even when multiple coauthors share an affiliation. A multinational paper appears once for each represented country. The international collaboration share uses papers with at least one known affiliated country as its denominator. Citation averages are descriptive because newer publications have had less time to accumulate citations.
+The completed run wrote these managed Delta tables under `workspace.default`:
 
-## Actions and transformations
+| Table | Contents | Rows |
+| --- | --- | ---: |
+| `openalex_ai_works` | Filtered AI papers | 4,845 |
+| `openalex_ai_annual` | Publication year and citation summaries | 8 |
+| `openalex_ai_topics` | Topic counts after the lookup join | 71 |
+| `openalex_ai_countries` | Counts by affiliated country | 122 |
+| `openalex_ai_institutions` | Counts by educational institution | 2,365 |
+| `openalex_ai_collaboration` | Cross-country collaboration by year | 8 |
+| `openalex_ai_ml_clusters` | Optional MLlib cluster summary | 3 |
 
-The three `filter()` calls, `select()`, and `withColumn()` construct `ai_works` lazily. Printing the DataFrame and calling `explain()` show its schema and planned operators without executing the full record scan. The following `count()` is an action: it starts a distributed Spark job and returns the number of matching works. The later `show()` and Delta writes are actions too. This sequence makes the execution boundary visible in the notebook.
+## What I found in the sample
 
-## Performance analysis
+The number of selected AI papers rises from **279 in 2018** to **1,331 in 2025**. The most frequent named topic is **Sentiment Analysis and Opinion Mining**, with **362** papers. The largest affiliated-country counts are **China (814)**, **Indonesia (562)**, and the **United States (555)**. **Tsinghua University (46)** has the highest educational-institution count in this sample. These are counts of papers represented in the selected files, not estimates of each country's or institution's total AI production.
 
-The initial filtered action returned **4,845 AI works** in **27.0 seconds**. The Photon Parquet scan covered the three exact S3 paths. Its physical plan listed the publication-year and `is_xpac` predicates under `DataFilters` and the primary AI subfield predicate under `DictionaryFilters`. It listed `PartitionFilters: []` because the read supplied exact files instead of a partition directory. The scan selected only columns needed by the filtered DataFrame. Query Details for this action showed **17/17 tasks completed**, **26.8 seconds** duration, **4,845 rows read**, and **6.72 MB bytes read** as reported by that view. Those metrics describe this query; they are not a measurement of all bytes in the 2.02 GB compressed input files.
+Among papers with a known affiliated country, the international-collaboration share ranges from **17.7% in 2024** to **22.3% in 2022**. This shows how the country arrays can be turned into a collaboration measure, but the year-to-year differences are small enough that I would not interpret them as a global trend from three update-date files. Likewise, the sample cannot establish whether ChatGPT caused an increase in LLM research. Answering that would require a broader snapshot sample, a defensible LLM topic definition, and a comparison that accounts for publication and indexing delays.
 
-The annual aggregation plan used `PhotonGroupingAgg` for partial aggregation before a hash exchange. Its Delta scan read only `publication_year`, `cited_by_count`, and `period`, confirming column pruning for that query. The Topics join used `PhotonBroadcastHashJoin` with the six small Topics files on the broadcast side, avoiding a shuffle of the Works side. For the initial count, Query Profile attributed **100% of aggregated operator time to the Scan** (2.91 minutes summed across parallel tasks), while its Shuffle operator took 9 ms; this does not mean the query's wall time was 2.91 minutes. The pipeline filters before exploding authorships and materializes the 4,845-row subset once. It reads three separate physical Parquet files and deliberately avoids `repartition()` before filtering. The saved subset and eight-row annual result are too small to justify publication-year partitioned output, which would produce tiny files; Spark performs a hash exchange only where grouping or deduplication requires one.
+## What Spark did during execution
 
-## Optional cache experiment
+The first `count()` on the filtered Works DataFrame returned **4,845** rows in **27.0 seconds**. Its physical plan shows a Photon Parquet scan over the three source paths. Spark placed the year and `is_xpac` tests in `DataFilters` and the AI subfield test in `DictionaryFilters`; the scan read only columns needed for this stage. The plan lists `PartitionFilters: []` because I supplied individual files rather than asking Spark to discover partitions from a directory. In Databricks Query Details, this action completed **17 of 17 tasks** in **26.8 seconds**. The view reported **4,845 rows** and **6.72 MB** read for this query; that query metric should not be confused with the 2.02 GB combined size of the input files.
 
-The final cache cell repeats the same filter on the original three Works Parquet files. Each `count()` returned **4,845** rows. The first uncached action took **14.17 seconds**; the action immediately after `.cache()` took **0.53 seconds**; a further cached action took **0.43 seconds**. The cell calls `.unpersist()` after the comparison. These are single-run, order-dependent timings. The much faster later actions demonstrate reuse in this session, but the measurement does not isolate DataFrame caching from warmed storage or other Databricks caching, so it is not a controlled estimate of the benefit of `.cache()` alone. The earlier comparison on the already compact Delta subset is less informative because all three counts took less than one second.
+The later plans show where distributed work becomes necessary. Spark uses `PhotonGroupingAgg` to aggregate locally before exchanging data for the annual totals. That query's Delta scan reads only `publication_year`, `cited_by_count`, and `period`, which is a useful example of column pruning. For the topic lookup, `PhotonBroadcastHashJoin` sends the small Topics side to workers instead of shuffling the larger Works side. I kept the filters ahead of the authorship explosions, avoided repartitioning the raw input, and saved the 4,845-row AI subset once for reuse. Partitioning the small output tables by publication year would create tiny partitions rather than help this workload.
 
-## Optional MLlib clustering
+The Query Profile makes the main bottleneck clear: the initial scan accounts for **100% of aggregated operator time** in that profile, while its shuffle operator accounts for **9 ms**. The displayed **2.91 minutes** for the scan is time summed across parallel tasks, not elapsed query time. Reading the source files dominates this first action; after filtering and materializing the much smaller Delta table, the aggregations and SQL queries work on a more manageable dataset. [The execution-plan screenshot](screenshots/physical_plan.png), [Query Details](screenshots/query_details.png), and [Query Profile](screenshots/query_profile.png) show the underlying evidence.
 
-The notebook uses `pyspark.ml` `VectorAssembler` and `KMeans` with **k = 3**, **seed = 13**, and at most 20 iterations. Features are scaled publication year `(year - 2018) / 7` and `log1p(cited_by_count) / 7`; negative or missing citation counts are treated as zero for feature construction. The clustering uses all **4,845** filtered sample works and saves a three-row summary in `workspace.default.openalex_ai_ml_clusters`.
+## Lazy transformations and actions
 
-| Cluster | Sample works | Mean publication year | Mean citations |
+The pipeline builds `ai_works` with `filter()`, `select()`, and `withColumn()`. Those transformations define a plan without processing all source records immediately. Printing the DataFrame and calling `explain()` lets me inspect its structure and planned operators. The following `count()` is the point where Spark actually launches the distributed computation. Later `show()` calls and Delta writes are actions as well. Seeing the plan before the count, then the timed job after it, made lazy evaluation much easier for me to understand.
+
+## Reusing data with `.cache()`
+
+I compared repeated `count()` actions on the same raw Parquet filter. Each returned **4,845** papers. The first, uncached action took **14.17 seconds**; the action immediately after `.cache()` took **0.53 seconds**; another cached action took **0.43 seconds**. The code releases the cached DataFrame with `.unpersist()` afterward. [The cache screenshot](screenshots/cache_comparison.png) shows the code and output.
+
+These are measurements from one ordered run, not a controlled speedup estimate. Later queries can also benefit from warmed storage or Databricks caching, so I cannot attribute the entire difference to Spark's DataFrame cache. The comparison still illustrates why repeated actions can be much cheaper once data has been read and made reusable. A separate count on the already small Delta subset was less informative: all of those actions took under a second.
+
+## An exploratory MLlib model
+
+As a small extension, I used `VectorAssembler` and MLlib `KMeans` to group the filtered papers by publication time and citations. The two features are `(publication_year - 2018) / 7` and `log1p(cited_by_count) / 7`; missing or negative citation values become zero when constructing the citation feature. I set `k=3`, `seed=13`, and `maxIter=20`, then saved the cluster summary as a Delta table.
+
+| Cluster | Papers | Mean publication year | Mean citations |
 | --- | ---: | ---: | ---: |
 | 0 | 1,377 | 2020.0 | 4.4 |
 | 1 | 2,521 | 2024.3 | 1.1 |
 | 2 | 947 | 2022.1 | 38.9 |
 
-These clusters describe publication time and citation counts in the selected files. Citation accumulation depends on article age, and KMeans labels do not identify research fields or explain why citations differ.
+The groups mainly reflect publication age and citation differences; they do not identify AI subfields or explain why some papers are cited more often. Newer papers have had less time to accumulate citations. [The MLlib execution screenshot](screenshots/ml_clusters.png) shows the successful run.
 
-## Findings
+## Reproduce the run and inspect the evidence
 
-The completed pipeline wrote seven managed Delta tables: **4,845** filtered works, **8** annual rows, **71** topic rows, **122** country rows, **2,365** educational-institution rows, **8** collaboration rows, and **3** ML cluster rows. The sample's annual counts rose from **279 in 2018** to **1,331 in 2025**. This describes the selected update-date file sample, not global OpenAlex growth. The most frequent Topics lookup label was **Sentiment Analysis and Opinion Mining** (**362** sample works). The largest country counts were **China 814**, **Indonesia 562**, and **United States 555**; a multinational work contributes to each of its countries. The highest educational-institution count was **Tsinghua University 46**. Among papers with a known affiliated country, the international-collaboration share ranged from **17.7% in 2024** to **22.3% in 2022**. These figures cannot support population rankings or a causal claim about ChatGPT because the three selected files are update-date clusters and the AI filter uses only the primary subfield.
+Open [`openalex_ai_pipeline.py`](openalex_ai_pipeline.py) as a Python notebook in Databricks, attach Serverless compute, and run the cells in order. The notebook reads the public OpenAlex paths above and writes the managed tables listed earlier to `workspace.default`. The source file uses Databricks `# COMMAND ----------` separators, so each stage can also be run and inspected separately.
 
-## Screenshots
+The [successful pipeline screenshot](screenshots/pipeline_success.png) shows the six core output tables. The MLlib screenshot above shows the seventh table's three-row result. The plan, Query Details, Query Profile, and cache screenshots are linked in the sections where I discuss them.
 
-These screenshots were captured from the completed Databricks notebook. They are cropped to the English notebook and Query Details content.
+## Data references
 
-- [Physical execution plan and pushed filters](screenshots/physical_plan.png)
-- [Successful execution and six saved output tables](screenshots/pipeline_success.png)
-- [Query Details for the initial filtered count](screenshots/query_details.png)
-- [Query Profile showing the scan bottleneck and small count shuffle](screenshots/query_profile.png)
-- [Successful MLlib KMeans execution and cluster summary](screenshots/ml_clusters.png)
-- [Raw Parquet cache comparison and successful execution](screenshots/cache_comparison.png)
-
-## Sources
-
-- [OpenAlex snapshot format and partitioning](https://help.openalex.org/access/snapshot/)
+- [OpenAlex snapshot access and structure](https://help.openalex.org/access/snapshot/)
 - [OpenAlex Works attributes](https://help.openalex.org/data/works/attributes/)
 - [OpenAlex Topics and hierarchy](https://help.openalex.org/data/topics/)
