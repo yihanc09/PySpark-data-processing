@@ -47,7 +47,11 @@ The completed pipeline wrote six managed Delta tables: **4,845** filtered works,
 
 ## Screenshots
 
-Real Databricks screenshots of the physical plan, successful saved-table execution, and Query Details will be added under `screenshots/`. The metrics above were transcribed from the completed notebook and Query Details view; screenshots are pending.
+These screenshots were captured from the completed Databricks notebook. They are cropped to the English notebook and Query Details content.
+
+- [Physical execution plan and pushed filters](screenshots/physical_plan.png)
+- [Successful execution and six saved output tables](screenshots/pipeline_success.png)
+- [Query Details for the initial filtered count](screenshots/query_details.png)
 
 ## Sources
 
