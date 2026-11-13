@@ -179,7 +179,7 @@ print("Uncached count:", uncached_count, "seconds:", round(uncached_seconds, 2))
 print("Cache materialization count:", materialized_count,
       "seconds:", round(materialization_seconds, 2))
 print("Cached repeat count:", cached_count, "seconds:", round(cached_seconds, 2))
-ai_works.unpersist()
+# Keep the cache available to the dependent output writes below.
 
 # COMMAND ----------
 # Persist compact results as managed Delta tables, as in the class demonstration.
@@ -197,3 +197,6 @@ for table_name in ("openalex_ai_works", "openalex_ai_annual",
                    "openalex_ai_institutions", "openalex_ai_collaboration"):
     table = f"{OUTPUT_SCHEMA}.{table_name}"
     print(table, spark.table(table).count(), "rows")
+
+# Release cached data after the dependent output writes have completed.
+ai_works.unpersist(blocking=True)
