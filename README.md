@@ -10,13 +10,15 @@ The result is a PySpark pipeline that reads **2.02 GB of OpenAlex Parquet files*
 
 I used the [OpenAlex public Parquet snapshot](https://help.openalex.org/access/snapshot/) dated **October 14, 2026**. The Works data includes publication dates, citation counts, primary topics, authorships, and institutional affiliations. A separate Topics dataset provides readable topic names. The snapshot's [Works manifest](https://openalex.s3.amazonaws.com/data/parquet/works/manifest.json) listed 1,898 files totaling about 744 GB; the [Topics manifest](https://openalex.s3.amazonaws.com/data/parquet/topics/manifest.json) listed six files totaling about 5.6 MB.
 
-Processing all Works files was unnecessary for this project, so I selected files with a fixed random seed. I first drew eight files from the manifest with `random.Random(13)`, then drew three of those with `random.Random(1301)`. Their combined compressed size in the manifest is **2,021,062,974 bytes**:
+The **744 GB** figure describes the entire Works collection in the manifest. My Spark job reads **three original Parquet files** from that collection, rather than all 1,898 files. To make the choice reproducible, I sampled eight candidate file paths with `random.Random(13)`, then selected three of those with `random.Random(1301)`. The three files contain **2,021,062,974 compressed bytes (2.02 GB)** in total. That is the size of the raw input Spark reads, not a compressed version of the full snapshot:
 
 ```text
 s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0008.parquet
 s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0011.parquet
 s3://openalex/data/parquet/works/updated_date=2026-10-14/part_0084.parquet
 ```
+
+The publication-year, `is_xpac`, and AI-topic filters are applied to those three files. They leave **4,845 matching works**, which I save as a smaller Delta table for the rest of the analysis.
 
 OpenAlex organizes these files by **last update date**, not publication year. The publication-year analysis below uses each work's `publication_year` field; the dates in the file paths identify the source partitions.
 
