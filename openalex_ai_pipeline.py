@@ -4,9 +4,10 @@
 # Run this notebook on Databricks Serverless from top to bottom.
 
 # COMMAND ----------
-from pyspark.sql import functions as F
 from time import perf_counter
+
 import requests
+from pyspark.sql import functions as F
 
 WORKS_PATHS = [
     "s3://openalex/data/parquet/works/updated_date=2026-10-07/part_0008.parquet",
@@ -23,18 +24,19 @@ print("Top-level columns:", len(raw_works.columns))
 # COMMAND ----------
 # Transformations build a plan. They do not process the full input yet.
 ai_works = (
-    raw_works
-    .filter(F.col("publication_year").between(2018, 2025))
+    raw_works.filter(F.col("publication_year").between(2018, 2025))
     .filter(F.col("is_xpac") == F.lit(False))
     .filter(F.col("primary_topic.subfield.id") == AI_SUBFIELD)
     .select(
-        "id", "publication_year", "cited_by_count", "authorships",
+        "id",
+        "publication_year",
+        "cited_by_count",
+        "authorships",
         F.col("primary_topic.id").alias("topic_id"),
     )
     .withColumn(
         "period",
-        F.when(F.col("publication_year") >= 2023, "2023-2025")
-         .otherwise("2018-2022"),
+        F.when(F.col("publication_year") >= 2023, "2023-2025").otherwise("2018-2022"),
     )
 )
 print("Lazy DataFrame:", ai_works)
@@ -72,10 +74,8 @@ response = requests.get(manifest_url, timeout=120)
 response.raise_for_status()
 topics_manifest = response.json()
 topic_paths = [entry["url"] for entry in topics_manifest["files"]]
-topics_lookup = (
-    spark.read.parquet(*topic_paths)
-    .select(F.col("id").alias("topic_id"),
-            F.col("display_name").alias("topic_name"))
+topics_lookup = spark.read.parquet(*topic_paths).select(
+    F.col("id").alias("topic_id"), F.col("display_name").alias("topic_name")
 )
 ai_topics = ai_works.join(F.broadcast(topics_lookup), "topic_id", "left")
 ai_topics.explain()
@@ -90,10 +90,14 @@ top_topics.show(15, truncate=False)
 # COMMAND ----------
 # Count each paper once per country, even if several coauthors share that country.
 country_works = (
-    ai_works.select("id", "publication_year",
-                    F.explode_outer("authorships").alias("authorship"))
-    .select("id", "publication_year",
-            F.explode_outer("authorship.countries").alias("country_code"))
+    ai_works.select(
+        "id", "publication_year", F.explode_outer("authorships").alias("authorship")
+    )
+    .select(
+        "id",
+        "publication_year",
+        F.explode_outer("authorship.countries").alias("country_code"),
+    )
     .filter(F.col("country_code").isNotNull())
     .dropDuplicates(["id", "country_code"])
 )
@@ -110,11 +114,16 @@ top_countries.show(15, truncate=False)
 institution_works = (
     ai_works.select("id", F.explode_outer("authorships").alias("authorship"))
     .select("id", F.explode_outer("authorship.institutions").alias("institution"))
-    .select("id", F.col("institution.id").alias("institution_id"),
-            F.col("institution.display_name").alias("institution_name"),
-            F.col("institution.type").alias("institution_type"))
-    .filter((F.col("institution_id").isNotNull()) &
-            (F.col("institution_type") == "education"))
+    .select(
+        "id",
+        F.col("institution.id").alias("institution_id"),
+        F.col("institution.display_name").alias("institution_name"),
+        F.col("institution.type").alias("institution_type"),
+    )
+    .filter(
+        (F.col("institution_id").isNotNull())
+        & (F.col("institution_type") == "education")
+    )
     .dropDuplicates(["id", "institution_id"])
 )
 top_institutions = (
@@ -133,8 +142,9 @@ collaboration_by_year = (
     .agg(
         F.count("*").alias("works_with_known_country"),
         F.sum(F.col("international").cast("int")).alias("international_works"),
-        F.round(F.avg(F.col("international").cast("int")) * 100, 1)
-         .alias("international_share_pct"),
+        F.round(F.avg(F.col("international").cast("int")) * 100, 1).alias(
+            "international_share_pct"
+        ),
     )
     .orderBy("publication_year")
 )
@@ -161,45 +171,30 @@ spark.sql("""
 """).show(truncate=False)
 
 # COMMAND ----------
-# Optional cache demonstration. Materialization is timed separately from reuse.
-started = perf_counter()
-uncached_count = ai_works.count()
-uncached_seconds = perf_counter() - started
-
-ai_works.cache()
-started = perf_counter()
-materialized_count = ai_works.count()
-materialization_seconds = perf_counter() - started
-
-started = perf_counter()
-cached_count = ai_works.count()
-cached_seconds = perf_counter() - started
-
-print("Uncached count:", uncached_count, "seconds:", round(uncached_seconds, 2))
-print("Cache materialization count:", materialized_count,
-      "seconds:", round(materialization_seconds, 2))
-print("Cached repeat count:", cached_count, "seconds:", round(cached_seconds, 2))
-# Keep the cache available to the dependent output writes below.
-
-# COMMAND ----------
-# Persist compact results as managed Delta tables, as in the class demonstration.
+# Persist the compact analysis results as managed Delta tables.
 annual_ai.write.mode("overwrite").saveAsTable(f"{OUTPUT_SCHEMA}.openalex_ai_annual")
 top_topics.write.mode("overwrite").saveAsTable(f"{OUTPUT_SCHEMA}.openalex_ai_topics")
-top_countries.write.mode("overwrite").saveAsTable(f"{OUTPUT_SCHEMA}.openalex_ai_countries")
+top_countries.write.mode("overwrite").saveAsTable(
+    f"{OUTPUT_SCHEMA}.openalex_ai_countries"
+)
 top_institutions.write.mode("overwrite").saveAsTable(
-    f"{OUTPUT_SCHEMA}.openalex_ai_institutions")
+    f"{OUTPUT_SCHEMA}.openalex_ai_institutions"
+)
 collaboration_by_year.write.mode("overwrite").saveAsTable(
-    f"{OUTPUT_SCHEMA}.openalex_ai_collaboration")
+    f"{OUTPUT_SCHEMA}.openalex_ai_collaboration"
+)
 
 print("Saved output tables:")
-for table_name in ("openalex_ai_works", "openalex_ai_annual",
-                   "openalex_ai_topics", "openalex_ai_countries",
-                   "openalex_ai_institutions", "openalex_ai_collaboration"):
+for table_name in (
+    "openalex_ai_works",
+    "openalex_ai_annual",
+    "openalex_ai_topics",
+    "openalex_ai_countries",
+    "openalex_ai_institutions",
+    "openalex_ai_collaboration",
+):
     table = f"{OUTPUT_SCHEMA}.{table_name}"
     print(table, spark.table(table).count(), "rows")
-
-# Release cached data after the dependent output writes have completed.
-ai_works.unpersist(blocking=True)
 
 # COMMAND ----------
 # Optional MLlib task: cluster sample AI works by publication time and citations.
@@ -209,8 +204,7 @@ from pyspark.ml.clustering import KMeans
 
 ml_works = (
     spark.table(f"{OUTPUT_SCHEMA}.openalex_ai_works")
-    .select("id", "publication_year", "cited_by_count")
-    .filter(F.col("publication_year").between(2018, 2025))
+    .select("publication_year", "cited_by_count")
     .withColumn("year_scaled", (F.col("publication_year") - F.lit(2018)) / F.lit(7.0))
     .withColumn(
         "log_citations_scaled",
@@ -222,8 +216,9 @@ assembler = VectorAssembler(
     inputCols=["year_scaled", "log_citations_scaled"], outputCol="features"
 )
 ml_input = assembler.transform(ml_works)
-kmeans = KMeans(k=3, seed=13, maxIter=20, featuresCol="features",
-                predictionCol="cluster")
+kmeans = KMeans(
+    k=3, seed=13, maxIter=20, featuresCol="features", predictionCol="cluster"
+)
 kmeans_model = kmeans.fit(ml_input)
 ml_predictions = kmeans_model.transform(ml_input)
 cluster_summary = (
@@ -267,10 +262,22 @@ raw_cached_count = raw_cache_probe.count()
 raw_cached_seconds = perf_counter() - started
 
 assert raw_uncached_count == raw_materialized_count == raw_cached_count
-print("Raw Parquet uncached count:", raw_uncached_count,
-      "seconds:", round(raw_uncached_seconds, 2))
-print("Raw Parquet cache materialization count:", raw_materialized_count,
-      "seconds:", round(raw_materialization_seconds, 2))
-print("Raw Parquet cached repeat count:", raw_cached_count,
-      "seconds:", round(raw_cached_seconds, 2))
+print(
+    "Raw Parquet uncached count:",
+    raw_uncached_count,
+    "seconds:",
+    round(raw_uncached_seconds, 2),
+)
+print(
+    "Raw Parquet cache materialization count:",
+    raw_materialized_count,
+    "seconds:",
+    round(raw_materialization_seconds, 2),
+)
+print(
+    "Raw Parquet cached repeat count:",
+    raw_cached_count,
+    "seconds:",
+    round(raw_cached_seconds, 2),
+)
 raw_cache_probe.unpersist(blocking=True)

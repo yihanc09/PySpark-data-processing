@@ -94,7 +94,7 @@ The Query Profile makes the main bottleneck clear: the initial scan accounts for
 
 I compared repeated `count()` actions on the same raw Parquet filter. Each returned **4,845** papers. The first, uncached action took **14.17 seconds**; the action immediately after `.cache()` took **0.53 seconds**; another cached action took **0.43 seconds**. The code releases the cached DataFrame with `.unpersist()` afterward. [The cache screenshot](screenshots/cache_comparison.png) shows the code and output.
 
-These are measurements from one ordered run, not a controlled speedup estimate. Later queries can also benefit from warmed storage or Databricks caching, so I cannot attribute the entire difference to Spark's DataFrame cache. The comparison still illustrates why repeated actions can be much cheaper once data has been read and made reusable. A separate count on the already small Delta subset was less informative: all of those actions took under a second.
+These are measurements from one ordered run, not a controlled speedup estimate. Later queries can also benefit from warmed storage or Databricks caching, so I cannot attribute the entire difference to Spark's DataFrame cache. The comparison still illustrates why repeated actions can be much cheaper once data has been read and made reusable.
 
 ## 3. Actions vs. transformations
 
